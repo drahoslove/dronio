@@ -14,8 +14,8 @@ import (
 	"golang.org/x/mobile/exp/gl/glutil"
 	"golang.org/x/mobile/gl"
 
-	"github.com/drahoslove/dronio/flyCtrl"
-	_ "github.com/drahoslove/dronio/vtxCtrl"
+	"github.com/drahoslove/dronio/fly"
+	_ "github.com/drahoslove/dronio/vtx"
 )
 
 var (
