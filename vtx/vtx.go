@@ -1,3 +1,7 @@
+// Package vtx is for controlling camera related stuff
+//
+// TCP port 7060 is for live video stream data (also for downloading/replaying captured videos)
+// TCP port 8060 is for the rest - start/stop video capturing, taking pohoto, listing videos on sd card etc.
 package vtx
 
 import (
@@ -5,40 +9,48 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
-	"path/filepath"
 	"reflect"
-	"time"
 	"unsafe"
 )
 
-// for controlling camera related stuff
+const (
+	off = 0
+	on  = 1
+)
 
-const ( // meaning of ints in msgs by position
+// Header of commands consists of "lewei_cmd\0" string and 9 uint32 numbers (little endian)
+// only first and fourth number has known meaning so far
+const (
 	cmdI = iota // action
 	_
 	_
-	lenI // payload size in Bytes appended after
+	lenI // payload size in Bytes appended after header
+	_
+	_
+	_
+	_
+	_
 )
 
-const ( // possible actions (cmdI)
+// possible actions (cmdI)
+const (
 	_                = 0x0001 // stream?
+	_                = 0x0003 // 7060
 	setClockCmd      = 0x0004
 	checkVideoCmd    = 0x0006
 	listVideosCmd    = 0x0008
+	playVideoCmd     = 0x0009 // 7060
+	_                = 0x0010 // close stream?
 	captureVideoCmd  = 0x0011
 	downloadVideoCmd = 0x0012 // 7060
 	takePhotoCmd     = 0x0013
 	deleteVideoCmd   = 0x0014
-	playVideoCmd     = 0x0009 // 7060
-	// listVideosCmd    = 0x0003 // 7060
-	_ = 0x0101 // ?? stream ?
-	_ = 0x0106 // recv videofile
-	_ = 0x0010 // close stream?
+	_                = 0x0101 // ?? stream ?
+	videoFileCmd     = 0x0106 // recv videofile after downloadVideoCmd
 )
 
-// LeweiCmd represents data packet (not tcp, but app layer) sent or received by drones vtx controller
+// LeweiCmd represents data packet (app layer) sent or received by vtx of the drone
 type LeweiCmd struct {
 	// sync.RWMutex
 	header  []byte // 46B => "lewei_cmd\0" + 9 × uint32 MSB (+payload)
@@ -95,20 +107,30 @@ func (c *LeweiCmd) String() (str string) {
 }
 
 func newConn(port int) *net.TCPConn {
-	raddr := &net.TCPAddr{IP: net.IPv4(192, 168, 0, 1), Port: port}
-	laddr := &net.TCPAddr{IP: net.IPv4(192, 168, 0, 2)} // auto port
+	raddr := &net.TCPAddr{IP: net.IPv4(192, 168, 0, 1), Port: port} // IP of drone
+	laddr := &net.TCPAddr{IP: getLocalIP()}                         // auto port
 	conn, err := net.DialTCP("tcp4", laddr, raddr)
-	if err != nil { // try secondary ip
-		laddr = &net.TCPAddr{IP: net.IPv4(192, 168, 0, 3)} // auto port
-		fmt.Printf("%v\n", err)
-		conn, err = net.DialTCP("tcp4", laddr, raddr)
-	}
 	if err != nil {
 		fmt.Printf("%v\n%v\n", fmt.Errorf("Cant't create connection, are you on right wifi?"), err)
 		return nil
 	}
-	conn.SetDeadline(time.Now().Add(time.Second * 5))
+	// conn.SetDeadline(time.Now().Add(time.Second * 50))
 	return conn
+}
+
+// getLocalIP gets smallest ip in 192.168.0.* which exists in the system
+func getLocalIP() net.IP {
+	bestIP := net.IPv4(192, 168, 0, 255)
+	addrs, _ := net.InterfaceAddrs()
+	for _, addr := range addrs {
+		ip := addr.(*net.IPNet).IP
+		if ip.Mask(ip.DefaultMask()).Equal(net.IPv4(192, 168, 0, 0)) { // is in same subnet
+			if ip[len(ip)-1] < bestIP[len(bestIP)-1] { // has lower last byte
+				bestIP = ip
+			}
+		}
+	}
+	return bestIP
 }
 
 func send(conn *net.TCPConn, cmd LeweiCmd) {
@@ -126,13 +148,18 @@ func recv(conn *net.TCPConn) LeweiCmd {
 		panic(err)
 	}
 	payloadLen := cmd.headerGet(lenI)
+	// println("payloadlen:", payloadLen)
 
 	cmd.payload.Grow(int(payloadLen))
-	io.CopyN(&cmd.payload, conn, int64(payloadLen))
+	recvN := int64(0)
+	for recvN < int64(payloadLen) {
+		n, _ := io.CopyN(&cmd.payload, conn, int64(payloadLen)-recvN)
+		recvN += n
+	}
 	return cmd
 }
 
-func portBytCmd(cmd uint32) int {
+func portByCmd(cmd uint32) int {
 	switch cmd {
 	case playVideoCmd, downloadVideoCmd:
 		return 7060
@@ -142,114 +169,53 @@ func portBytCmd(cmd uint32) int {
 }
 
 func byteToUint32(arr []byte) []uint32 {
-	clone := arr[:]
-	header := *(*reflect.SliceHeader)(unsafe.Pointer(&clone))
+	arr = arr[:]
+	header := *(*reflect.SliceHeader)(unsafe.Pointer(&arr))
 	header.Len /= 4 // (32 bit = 4 bytes)
 	header.Cap /= 4
 	return *(*[]uint32)(unsafe.Pointer(&header))
 }
 
-// Req will make request of type given by cmd and call callback function with response payload in byte slice
-func Req(cmd uint32, payload interface{}, callback func([]byte)) {
-	conn := newConn(portBytCmd(cmd))
+// Action combines together Req and Res functions
+//
+// it will make request of type given by cmd and call callback function with response payload in byte slice
+func Action(cmd uint32, payload interface{}, callback func([]byte)) {
+	conn := newConn(portByCmd(cmd))
 	if conn == nil {
 		return
 	}
 	defer conn.Close()
+	Req(cmd, payload, conn)
+	data := Res(cmd, conn)
 
+	// fmt.Printf("payload: %v\n", byteToUint32(data))
+	if callback != nil {
+		callback(data)
+	}
+}
+
+// Req will create and send request to TCP conn
+//
+// Use Action instead, if you expect response with same cmd type
+func Req(cmd uint32, payload interface{}, conn *net.TCPConn) {
 	// send request
 	req := NewLeweiCmd(cmd)
 	req.AddPayload(payload)
 	send(conn, req)
-	println("req:", req.String())
+	// println("req:", req.String())
+}
 
+// Res will obtain response from TCP conn
+//
+// Use Action instead, if tis is response for requsest of same cmd type
+func Res(cmd uint32, conn *net.TCPConn) (payload []byte) {
 	// load payload:
 	resp := recv(conn)
-	println("resp:", resp.String())
+	// println("resp:", resp.String())
 
 	// check return type
 	if resp.headerGet(cmdI) != cmd {
 		panic("Invalid response command type")
 	}
-	fmt.Printf("payload: %v\n", byteToUint32(resp.payload.Bytes()))
-	if callback != nil {
-		callback(resp.payload.Bytes())
-	}
-}
-
-// SetClock sets internal clock of the drone to currnet time (for saving files by actuall current date)
-func SetClock() {
-	timestamp := time.Now().Unix()
-	data := []uint32{uint32(timestamp), 0}
-	Req(setClockCmd, data, nil)
-}
-
-// TakePhoto will take photo and save to current dir
-func TakePhoto() {
-	Req(takePhotoCmd, nil, func(payload []byte) {
-		// parse payload:
-		fileSize := binary.LittleEndian.Uint32(payload[0:4])
-		fileName := string(bytes.Trim(payload[3*4:3*4+100], "\x00"))
-		fileContent := payload[32*4 : 32*4+fileSize]
-
-		println(fileSize, fileName)
-
-		// output file
-		err := ioutil.WriteFile(filepath.Base(fileName), fileContent, 0777)
-		if err != nil {
-			panic(err)
-		}
-	})
-}
-
-func ListVideos() {
-	Req(listVideosCmd, nil, func(payload []byte) {
-		for ; len(payload) > 0; payload = payload[116:] {
-			duration := binary.LittleEndian.Uint32(payload[4:8])
-			fileName := string(bytes.Trim(payload[4*4:4*4+100], "\x00"))
-			println(duration, "\t", fileName)
-		}
-	})
-}
-
-func DeleteVideo(filename string) {
-	payload := make([]byte, 100)
-	copy(payload, filename)
-	Req(deleteVideoCmd, payload, nil)
-}
-
-func DownloadVideo(filename string) {
-	payload := make([]byte, 196)
-	copy(payload[4*4:], filename)
-	Req(downloadVideoCmd, payload, nil)
-}
-
-// CaptureVideo will capture video of given period of time
-func CaptureVideo(duration time.Duration) {
-	StartVideo()
-	time.Sleep(duration)
-	StopVideo()
-}
-
-func IsCapturing() bool {
-	isCapturing := false
-	Req(checkVideoCmd, nil, func(payload []byte) {
-		capturing := byteToUint32(payload)[0]
-		isCapturing = capturing == 1
-	})
-	return isCapturing
-}
-
-// StartVideo will start video recording (unless it already started)
-func StartVideo() {
-	if !IsCapturing() {
-		Req(captureVideoCmd, []uint32{1, 4, 0, 24*60*60 - 1, 300}, nil)
-	}
-}
-
-// StopVideo will stop video recording (unless it already stopped)
-func StopVideo() {
-	if IsCapturing() {
-		Req(captureVideoCmd, []uint32{0, 4, 0, 24*60*60 - 1, 300}, nil)
-	}
+	return resp.payload.Bytes()
 }

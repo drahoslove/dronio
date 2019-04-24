@@ -19,8 +19,16 @@ func TestCaptureVideo(t *testing.T) {
 	// TakePhoto()
 	// ListVideos()
 
-	CaptureVideo(10 * time.Second)
-	// time.Sleep(time.Second)
-	// ListVideos()
-
+	println("video capture started")
+	// CaptureVideo(400 * time.Second)
+	println("video capture ended")
+	time.Sleep(time.Second * 2)
+	videos := ListVideos()
+	for _, video := range videos {
+		println("downloading video", video.filename)
+		DownloadVideo(video.filename)
+		time.Sleep(time.Second * 2)
+		println("deleting video", video.filename)
+		// DeleteVideo(video.filename)
+	}
 }
