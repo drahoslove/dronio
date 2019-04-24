@@ -8,7 +8,9 @@ import (
 	"io/ioutil"
 	"net"
 	"path/filepath"
+	"reflect"
 	"time"
+	"unsafe"
 )
 
 // for controlling camera related stuff
@@ -22,17 +24,18 @@ const ( // meaning of ints in msgs by position
 
 const ( // possible actions (cmdI)
 	_                = 0x0001 // stream?
-	takePhotoCmd     = 0x0013
-	startRecordCmd   = 0x0006
-	stopRecordCmd    = 0x0011
-	deleteVideoCmd   = 0x0014
+	setClockCmd      = 0x0004
+	checkVideoCmd    = 0x0006
+	listVideosCmd    = 0x0008
+	captureVideoCmd  = 0x0011
 	downloadVideoCmd = 0x0012 // 7060
+	takePhotoCmd     = 0x0013
+	deleteVideoCmd   = 0x0014
 	playVideoCmd     = 0x0009 // 7060
 	// listVideosCmd    = 0x0003 // 7060
-	listVideosCmd = 0x0008 // 8060
-	_             = 0x0101 // ?? stream ?
-	_             = 0x0106 // recv videofile
-	_             = 0x0010 // close stream?
+	_ = 0x0101 // ?? stream ?
+	_ = 0x0106 // recv videofile
+	_ = 0x0010 // close stream?
 )
 
 // LeweiCmd represents data packet (not tcp, but app layer) sent or received by drones vtx controller
@@ -95,8 +98,13 @@ func newConn(port int) *net.TCPConn {
 	raddr := &net.TCPAddr{IP: net.IPv4(192, 168, 0, 1), Port: port}
 	laddr := &net.TCPAddr{IP: net.IPv4(192, 168, 0, 2)} // auto port
 	conn, err := net.DialTCP("tcp4", laddr, raddr)
+	if err != nil { // try secondary ip
+		laddr = &net.TCPAddr{IP: net.IPv4(192, 168, 0, 3)} // auto port
+		fmt.Printf("%v\n", err)
+		conn, err = net.DialTCP("tcp4", laddr, raddr)
+	}
 	if err != nil {
-		fmt.Printf("%v", fmt.Errorf("Cant't create connection, are you on right wifi?"))
+		fmt.Printf("%v\n%v\n", fmt.Errorf("Cant't create connection, are you on right wifi?"), err)
 		return nil
 	}
 	conn.SetDeadline(time.Now().Add(time.Second * 5))
@@ -133,8 +141,16 @@ func portBytCmd(cmd uint32) int {
 	}
 }
 
+func byteToUint32(arr []byte) []uint32 {
+	clone := arr[:]
+	header := *(*reflect.SliceHeader)(unsafe.Pointer(&clone))
+	header.Len /= 4 // (32 bit = 4 bytes)
+	header.Cap /= 4
+	return *(*[]uint32)(unsafe.Pointer(&header))
+}
+
 // Req will make request of type given by cmd and call callback function with response payload in byte slice
-func Req(cmd uint32, payload []byte, callback func([]byte)) {
+func Req(cmd uint32, payload interface{}, callback func([]byte)) {
 	conn := newConn(portBytCmd(cmd))
 	if conn == nil {
 		return
@@ -145,31 +161,28 @@ func Req(cmd uint32, payload []byte, callback func([]byte)) {
 	req := NewLeweiCmd(cmd)
 	req.AddPayload(payload)
 	send(conn, req)
-	println(req.String())
+	println("req:", req.String())
 
 	// load payload:
 	resp := recv(conn)
-	println(resp.String())
+	println("resp:", resp.String())
 
 	// check return type
 	if resp.headerGet(cmdI) != cmd {
 		panic("Invalid response command type")
 	}
+	fmt.Printf("payload: %v\n", byteToUint32(resp.payload.Bytes()))
 	if callback != nil {
 		callback(resp.payload.Bytes())
 	}
 }
 
-// func Post(cmd uint32, payload []byte) {
-// 	conn := newConn(portBytCmd(cmd))
-// 	if conn == nil {
-// 		return
-// 	}
-// 	defer conn.Close()
-// 	req := NewLeweiCmd(cmd)
-// 	req.AddPayload(payload)
-// 	send(conn, req)
-// }
+// SetClock sets internal clock of the drone to currnet time (for saving files by actuall current date)
+func SetClock() {
+	timestamp := time.Now().Unix()
+	data := []uint32{uint32(timestamp), 0}
+	Req(setClockCmd, data, nil)
+}
 
 // TakePhoto will take photo and save to current dir
 func TakePhoto() {
@@ -191,11 +204,10 @@ func TakePhoto() {
 
 func ListVideos() {
 	Req(listVideosCmd, nil, func(payload []byte) {
-		for len(payload) > 0 {
+		for ; len(payload) > 0; payload = payload[116:] {
 			duration := binary.LittleEndian.Uint32(payload[4:8])
 			fileName := string(bytes.Trim(payload[4*4:4*4+100], "\x00"))
 			println(duration, "\t", fileName)
-			payload = payload[116:]
 		}
 	})
 }
@@ -212,13 +224,32 @@ func DownloadVideo(filename string) {
 	Req(downloadVideoCmd, payload, nil)
 }
 
-// CaptureVideo will capture vide of given period of time
+// CaptureVideo will capture video of given period of time
 func CaptureVideo(duration time.Duration) {
-	Req(startRecordCmd, nil, func(payload []byte) {
-		println(string(payload))
-	})
+	StartVideo()
 	time.Sleep(duration)
-	Req(stopRecordCmd, nil, func(payload []byte) {
-		println(string(payload))
+	StopVideo()
+}
+
+func IsCapturing() bool {
+	isCapturing := false
+	Req(checkVideoCmd, nil, func(payload []byte) {
+		capturing := byteToUint32(payload)[0]
+		isCapturing = capturing == 1
 	})
+	return isCapturing
+}
+
+// StartVideo will start video recording (unless it already started)
+func StartVideo() {
+	if !IsCapturing() {
+		Req(captureVideoCmd, []uint32{1, 4, 0, 24*60*60 - 1, 300}, nil)
+	}
+}
+
+// StopVideo will stop video recording (unless it already stopped)
+func StopVideo() {
+	if IsCapturing() {
+		Req(captureVideoCmd, []uint32{0, 4, 0, 24*60*60 - 1, 300}, nil)
+	}
 }
