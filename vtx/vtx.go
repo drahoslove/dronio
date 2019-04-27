@@ -36,20 +36,26 @@ const (
 
 // possible actions (cmdI)
 const (
-	keepAliveCmd     = 0x0001 // 7060
+	// res/req
+	keepAliveCmd    = 0x0001 // 7060
+	setClockCmd     = 0x0004
+	checkVideoCmd   = 0x0006
+	listVideosCmd   = 0x0008
+	captureVideoCmd = 0x0011
+	takePhotoCmd    = 0x0013
+	deleteVideoCmd  = 0x0014
+	// ??
+	_        = 0x0003 // 7060 // ?
+	closeCmd = 0x0010 // 7060 close stream?
+	// req only
 	_                = 0x0002 // 7060 // start stream?
-	_                = 0x0003 // 7060
-	setClockCmd      = 0x0004
-	checkVideoCmd    = 0x0006
-	listVideosCmd    = 0x0008
-	playVideoCmd     = 0x0009 // 7060
-	_                = 0x0010 // close stream?
-	captureVideoCmd  = 0x0011
+	replayVideoCmd   = 0x0009 // 7060
 	downloadVideoCmd = 0x0012 // 7060
-	takePhotoCmd     = 0x0013
-	deleteVideoCmd   = 0x0014
+	// respo only
 	_                = 0x0101 // 7060 stream ? after 0002
-	videoFileCmd     = 0x0106 // recv videofile after downloadVideoCmd
+	videoReplayCmd   = 0x0103 // 7060 video play after replayVideoCmd
+	_                = 0x0105 // 7060 ?? replay end?
+	videoDownloadCmd = 0x0106 // recv videofile after downloadVideoCmd
 )
 
 // LeweiCmd represents data packet (app layer) sent or received by vtx of the drone
@@ -122,7 +128,9 @@ func newConn(port int) (*net.TCPConn, func()) {
 	return conn, closeConn
 }
 
-// KeepAlive will keep conn alive until function returned by it is called
+// KeepAlive will keep connection alive until function returned by it is called
+//
+// Socket will be othervise closed by the server after 5-10s if it is not written to
 func keepAlive(conn *net.TCPConn) func() {
 	ticker := time.NewTicker(time.Second * 2)
 	stop := make(chan bool)
@@ -130,6 +138,7 @@ func keepAlive(conn *net.TCPConn) func() {
 		for {
 			select {
 			case <-ticker.C:
+				println("keepalive")
 				Req(keepAliveCmd, nil, conn)
 			case <-stop:
 				ticker.Stop()
@@ -158,17 +167,19 @@ func getLocalIP() net.IP {
 	return bestIP
 }
 
+// send LeweiCmd
 func send(conn *net.TCPConn, cmd LeweiCmd) error {
 	_, err := conn.Write(cmd.header)
 	conn.Write(cmd.payload.Bytes())
 	return err
 }
 
+// recv LeweiCmd
 func recv(conn *net.TCPConn) (LeweiCmd, error) {
 	cmd := NewLeweiCmd(0)
 	n, err := conn.Read(cmd.header)
 	if n != len(cmd.header) {
-		println("not whole header", len(cmd.header), n) // correct port?
+		fmt.Println("not whole header", len(cmd.header), n) // correct port?
 	}
 	if err != nil {
 		return cmd, err
@@ -189,7 +200,7 @@ func recv(conn *net.TCPConn) (LeweiCmd, error) {
 
 func portByCmd(cmd uint32) int {
 	switch cmd {
-	case playVideoCmd, downloadVideoCmd, keepAliveCmd:
+	case replayVideoCmd, downloadVideoCmd, keepAliveCmd:
 		return 7060
 	default:
 		return 8060
@@ -204,7 +215,7 @@ func byteToUint32(arr []byte) []uint32 {
 	return *(*[]uint32)(unsafe.Pointer(&header))
 }
 
-// Action combines together Req and Res functions
+// Action combines together Req and Res functions and open/closes own connection
 //
 // it will make request of type given by cmd and call callback function with response payload in byte slice
 func Action(cmd uint32, payload interface{}, callback func([]byte)) {
@@ -231,7 +242,7 @@ func Req(cmd uint32, payload interface{}, conn *net.TCPConn) {
 	send(conn, req)
 }
 
-// Res will obtain response from TCP conn
+// Res will obtain response from TCP conn (while skipping keepalive cmds)
 //
 // Use Action instead, if tis is response for requsest of same cmd type
 func Res(cmd uint32, conn *net.TCPConn) (payload []byte) {
@@ -245,9 +256,13 @@ start:
 		if recvCmd == keepAliveCmd {
 			// ignore keepAlive response and start over
 			goto start
-		} else {
-			panic(fmt.Errorf("invalid response command type; exp %v; got %v", cmd, recvCmd))
 		}
+		if recvCmd == 0 { // closed channel? retun empty cmd
+			return []byte{}
+		}
+		panic(fmt.Errorf("invalid response command type; exp %v; got %v", cmd, recvCmd))
 	}
+	conn.SetDeadline(time.Now().Add(time.Second * 10))
+
 	return resp.payload.Bytes()
 }

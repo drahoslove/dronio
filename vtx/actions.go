@@ -87,13 +87,14 @@ func DownloadVideo(fileName string) {
 	bytesLoaded := 0
 loop:
 	for { // obtain responses
-		data := Res(videoFileCmd, conn)
+		data := Res(videoDownloadCmd, conn)
 		data32 := byteToUint32(data)
 		chunkSize := int(data32[1])
 		fileSize := int(data32[2])
+		recvFileName := string(bytes.Trim(data[4*4:4*4+100], "\x00"))
 
 		// check if this is data for requested file
-		if !bytes.Equal(payload[4*4:4*4+100], data[4*4:4*4+100]) {
+		if recvFileName != fileName {
 			fmt.Printf("%v\n%v\n", fmt.Errorf("Can't download this video - bad response"), data[:len(payload)])
 			return
 		}
@@ -130,6 +131,57 @@ loop:
 		}
 	}
 	println("done")
+}
+
+func ReplayVideo(fileName string) {
+	// create custom connection because we cant use Action in this case
+	conn, closeConn := newConn(portByCmd(downloadVideoCmd))
+	if conn == nil {
+		return
+	}
+	defer closeConn()
+
+	payload := make([]byte, 124)
+	payload32 := byteToUint32(payload)
+	payload32[1] = 0x0000003a // ??
+	copy(payload[2*4:4*18], "_lewei_lib_Lewei"+fileName+"\x00ava_lang_String_2III")
+	payload32[19] = 0x00006300
+	payload32[21] = 0x00001a00
+	payload32[25] = 0xff002000
+	payload32[27] = 0xffffff00
+	payload32[29] = 0xffffff00
+	// fmt.Printf("% x\n", payload)
+
+	file, _ := os.OpenFile("replay"+filepath.Base(fileName), os.O_CREATE|os.O_WRONLY, 0777)
+	defer file.Close()
+
+	Req(replayVideoCmd, payload, conn)
+
+	for {
+		// incoming()
+		data := Res(videoReplayCmd, conn)
+		data32 := byteToUint32(data)
+		if len(data) == 0 {
+			println("eend")
+			Req(closeCmd, nil, conn)
+			return
+		}
+
+		chunkSize := data32[1]
+		chunkContent := data[8*4:]
+
+		// println(len(data) - int(chunkSize))
+		if chunkSize == 0 {
+			println("end", data32[0])
+			Req(closeCmd, nil, conn)
+			return
+		}
+
+		fmt.Printf("% v\n", data32[:10])
+		// fmt.Printf("% v\n", data[10*4:20*4])
+		// println("write", data32[0])
+		file.Write(chunkContent)
+	}
 }
 
 // CaptureVideo will capture video of given period of time

@@ -27,7 +27,8 @@ func TestCaptureVideo(t *testing.T) {
 	for _, video := range videos {
 		println("downloading video", video.filename)
 		t1 := time.Now()
-		DownloadVideo(video.filename)
+		// DownloadVideo(video.filename)
+		ReplayVideo(video.filename)
 		println(time.Now().Sub(t1).String())
 		time.Sleep(time.Second * 2)
 		println("deleting video", video.filename)
