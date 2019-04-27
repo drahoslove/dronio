@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"reflect"
+	"time"
 	"unsafe"
 )
 
@@ -35,7 +36,8 @@ const (
 
 // possible actions (cmdI)
 const (
-	_                = 0x0001 // stream?
+	keepAliveCmd     = 0x0001 // 7060
+	_                = 0x0002 // 7060 // start stream?
 	_                = 0x0003 // 7060
 	setClockCmd      = 0x0004
 	checkVideoCmd    = 0x0006
@@ -46,7 +48,7 @@ const (
 	downloadVideoCmd = 0x0012 // 7060
 	takePhotoCmd     = 0x0013
 	deleteVideoCmd   = 0x0014
-	_                = 0x0101 // ?? stream ?
+	_                = 0x0101 // 7060 stream ? after 0002
 	videoFileCmd     = 0x0106 // recv videofile after downloadVideoCmd
 )
 
@@ -106,16 +108,39 @@ func (c *LeweiCmd) String() (str string) {
 	return str
 }
 
-func newConn(port int) *net.TCPConn {
+func newConn(port int) (*net.TCPConn, func()) {
 	raddr := &net.TCPAddr{IP: net.IPv4(192, 168, 0, 1), Port: port} // IP of drone
 	laddr := &net.TCPAddr{IP: getLocalIP()}                         // auto port
 	conn, err := net.DialTCP("tcp4", laddr, raddr)
 	if err != nil {
 		fmt.Printf("%v\n%v\n", fmt.Errorf("Cant't create connection, are you on right wifi?"), err)
-		return nil
+		return nil, nil
 	}
+	conn.SetDeadline(time.Time{})
 	// conn.SetDeadline(time.Now().Add(time.Second * 50))
-	return conn
+	closeConn := keepAlive(conn)
+	return conn, closeConn
+}
+
+// KeepAlive will keep conn alive until function returned by it is called
+func keepAlive(conn *net.TCPConn) func() {
+	ticker := time.NewTicker(time.Second * 2)
+	stop := make(chan bool)
+	go func() {
+		for {
+			select {
+			case <-ticker.C:
+				Req(keepAliveCmd, nil, conn)
+			case <-stop:
+				ticker.Stop()
+				conn.Close()
+				return
+			}
+		}
+	}()
+	return func() {
+		stop <- true
+	}
 }
 
 // getLocalIP gets smallest ip in 192.168.0.* which exists in the system
@@ -133,35 +158,38 @@ func getLocalIP() net.IP {
 	return bestIP
 }
 
-func send(conn *net.TCPConn, cmd LeweiCmd) {
-	conn.Write(cmd.header)
+func send(conn *net.TCPConn, cmd LeweiCmd) error {
+	_, err := conn.Write(cmd.header)
 	conn.Write(cmd.payload.Bytes())
+	return err
 }
 
-func recv(conn *net.TCPConn) LeweiCmd {
+func recv(conn *net.TCPConn) (LeweiCmd, error) {
 	cmd := NewLeweiCmd(0)
 	n, err := conn.Read(cmd.header)
 	if n != len(cmd.header) {
 		println("not whole header", len(cmd.header), n) // correct port?
 	}
 	if err != nil {
-		panic(err)
+		return cmd, err
 	}
 	payloadLen := cmd.headerGet(lenI)
-	// println("payloadlen:", payloadLen)
 
 	cmd.payload.Grow(int(payloadLen))
 	recvN := int64(0)
 	for recvN < int64(payloadLen) {
-		n, _ := io.CopyN(&cmd.payload, conn, int64(payloadLen)-recvN)
+		n, err := io.CopyN(&cmd.payload, conn, int64(payloadLen)-recvN)
 		recvN += n
+		if err != nil {
+			return cmd, err
+		}
 	}
-	return cmd
+	return cmd, nil
 }
 
 func portByCmd(cmd uint32) int {
 	switch cmd {
-	case playVideoCmd, downloadVideoCmd:
+	case playVideoCmd, downloadVideoCmd, keepAliveCmd:
 		return 7060
 	default:
 		return 8060
@@ -180,15 +208,14 @@ func byteToUint32(arr []byte) []uint32 {
 //
 // it will make request of type given by cmd and call callback function with response payload in byte slice
 func Action(cmd uint32, payload interface{}, callback func([]byte)) {
-	conn := newConn(portByCmd(cmd))
+	conn, closeConn := newConn(portByCmd(cmd))
 	if conn == nil {
 		return
 	}
-	defer conn.Close()
+	defer closeConn()
 	Req(cmd, payload, conn)
 	data := Res(cmd, conn)
 
-	// fmt.Printf("payload: %v\n", byteToUint32(data))
 	if callback != nil {
 		callback(data)
 	}
@@ -202,7 +229,6 @@ func Req(cmd uint32, payload interface{}, conn *net.TCPConn) {
 	req := NewLeweiCmd(cmd)
 	req.AddPayload(payload)
 	send(conn, req)
-	// println("req:", req.String())
 }
 
 // Res will obtain response from TCP conn
@@ -210,12 +236,18 @@ func Req(cmd uint32, payload interface{}, conn *net.TCPConn) {
 // Use Action instead, if tis is response for requsest of same cmd type
 func Res(cmd uint32, conn *net.TCPConn) (payload []byte) {
 	// load payload:
-	resp := recv(conn)
-	// println("resp:", resp.String())
+start:
+	resp, _ := recv(conn)
 
 	// check return type
-	if resp.headerGet(cmdI) != cmd {
-		panic("Invalid response command type")
+	recvCmd := resp.headerGet(cmdI)
+	if recvCmd != cmd {
+		if recvCmd == keepAliveCmd {
+			// ignore keepAlive response and start over
+			goto start
+		} else {
+			panic(fmt.Errorf("invalid response command type; exp %v; got %v", cmd, recvCmd))
+		}
 	}
 	return resp.payload.Bytes()
 }

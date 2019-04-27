@@ -72,11 +72,11 @@ func DeleteVideo(filename string) {
 // DownloadVideo will dowlnoad video by given name
 func DownloadVideo(fileName string) {
 	// create custom connection because we cant use Action in this case
-	conn := newConn(portByCmd(downloadVideoCmd))
+	conn, closeConn := newConn(portByCmd(downloadVideoCmd))
 	if conn == nil {
 		return
 	}
-	defer conn.Close()
+	defer closeConn()
 
 	// send Req for downloading video
 	payload := make([]byte, 196)
@@ -89,26 +89,25 @@ loop:
 	for { // obtain responses
 		data := Res(videoFileCmd, conn)
 		data32 := byteToUint32(data)
+		chunkSize := int(data32[1])
+		fileSize := int(data32[2])
 
 		// check if this is data for requested file
 		if !bytes.Equal(payload[4*4:4*4+100], data[4*4:4*4+100]) {
 			fmt.Printf("%v\n%v\n", fmt.Errorf("Can't download this video - bad response"), data[:len(payload)])
 			return
 		}
-		// conn.SetDeadline(time.Now().Add(time.Second * 10))
 
 		switch data32[0] { // first number is type of data (1 = start, 2 = data, 3 = end)
 		case 1: // start
 			// create empty file
-			err := error(nil)
-			file, err = os.OpenFile(filepath.Base(fileName), os.O_CREATE|os.O_WRONLY, 0777)
+			file, err := os.OpenFile(filepath.Base(fileName), os.O_CREATE|os.O_WRONLY, 0777)
 			if err != nil {
 				fmt.Printf("%v %v\n%v\n", fmt.Errorf("Can't crate video file"), fileName, err)
 				return
 			}
+			defer file.Close()
 		case 2: // load data chunks
-			chunkSize := int(data32[1])
-			fileSize := int(data32[2])
 			// the rest is the file itself
 			chunkContent := data[len(payload) : len(payload)+chunkSize]
 			// save file content to current directory
@@ -117,13 +116,16 @@ loop:
 				panic(err)
 			}
 			bytesLoaded += chunkSize
-			fmt.Printf("%d%%\n", bytesLoaded*100/fileSize)
 		case 3: // end
+			fmt.Printf("%d%%\n", bytesLoaded*100/fileSize)
+			println("checksum:", chunkSize, bytesLoaded, fileSize, string(data[116:]))
+			if bytesLoaded == fileSize {
+				break loop
+			}
+			println("Not whole file recieved")
 			// TODO check checksum
-			file.Close()
-			println("checksum:", string(data[116:]))
-			break loop
 		default:
+			fmt.Printf("wrong state %v\n", data32)
 			break loop
 		}
 	}
