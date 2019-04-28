@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"reflect"
 	"time"
 	"unsafe"
@@ -52,10 +53,10 @@ const (
 	replayVideoCmd   = 0x0009 // 7060
 	downloadVideoCmd = 0x0012 // 7060
 	// respo only
-	_                = 0x0101 // 7060 stream ? after 0002
-	videoReplayCmd   = 0x0103 // 7060 video play after replayVideoCmd
-	_                = 0x0105 // 7060 ?? replay end?
-	videoDownloadCmd = 0x0106 // recv videofile after downloadVideoCmd
+	_                 = 0x0101 // 7060 stream ? after 0002
+	videoReplayCmd    = 0x0103 // 7060 video play after replayVideoCmd
+	videoReplayEndCmd = 0x0105 // 7060 ?? replay end?
+	videoDownloadCmd  = 0x0106 // recv videofile after downloadVideoCmd
 )
 
 // LeweiCmd represents data packet (app layer) sent or received by vtx of the drone
@@ -119,7 +120,7 @@ func newConn(port int) (*net.TCPConn, func()) {
 	laddr := &net.TCPAddr{IP: getLocalIP()}                         // auto port
 	conn, err := net.DialTCP("tcp4", laddr, raddr)
 	if err != nil {
-		fmt.Printf("%v\n%v\n", fmt.Errorf("Cant't create connection, are you on right wifi?"), err)
+		fmt.Fprintf(os.Stderr, "%v\n%v\n", fmt.Errorf("Cant't create connection, are you on right wifi?"), err)
 		return nil, nil
 	}
 	conn.SetDeadline(time.Time{})
@@ -179,7 +180,7 @@ func recv(conn *net.TCPConn) (LeweiCmd, error) {
 	cmd := NewLeweiCmd(0)
 	n, err := conn.Read(cmd.header)
 	if n != len(cmd.header) {
-		fmt.Println("not whole header", len(cmd.header), n) // correct port?
+		println("not whole header", len(cmd.header), n) // correct port?
 	}
 	if err != nil {
 		return cmd, err
@@ -205,6 +206,14 @@ func portByCmd(cmd uint32) int {
 	default:
 		return 8060
 	}
+}
+
+func byteToUint16(arr []byte) []uint16 {
+	arr = arr[:]
+	header := *(*reflect.SliceHeader)(unsafe.Pointer(&arr))
+	header.Len /= 2 // (16 bit = 2 bytes)
+	header.Cap /= 2
+	return *(*[]uint16)(unsafe.Pointer(&header))
 }
 
 func byteToUint32(arr []byte) []uint32 {
@@ -256,6 +265,10 @@ start:
 		if recvCmd == keepAliveCmd {
 			// ignore keepAlive response and start over
 			goto start
+		}
+		if cmd == videoReplayCmd && recvCmd == videoReplayEndCmd {
+			println("video replay end??")
+			return resp.payload.Bytes()
 		}
 		if recvCmd == 0 { // closed channel? retun empty cmd
 			return []byte{}

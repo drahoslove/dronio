@@ -11,27 +11,25 @@ func TestTakePhoto(t *testing.T) {
 
 func TestCaptureVideo(t *testing.T) {
 	SetClock()
-	// ListVideos()
-	// DeleteVideo("a:/Video/20181206_230946.mp4")
-	// DownloadVideo("a:/Video/20181205_225611.mp4")
-	// ListVideos()
-
 	// TakePhoto()
 	// ListVideos()
 
 	println("video capture started")
-	// CaptureVideo(400 * time.Second)
+	CaptureVideo(20 * time.Second)
 	println("video capture ended")
 	time.Sleep(time.Second * 2)
 	videos := ListVideos()
+	println("videos listed")
 	for _, video := range videos {
-		println("downloading video", video.filename)
+		println("downloading video", video.Filename)
 		t1 := time.Now()
-		// DownloadVideo(video.filename)
-		ReplayVideo(video.filename)
+		DownloadVideo(video.Filename)
+		println("saving videoreplay")
+		ReplayVideo(video.Filename)
 		println(time.Now().Sub(t1).String())
 		time.Sleep(time.Second * 2)
-		println("deleting video", video.filename)
-		// DeleteVideo(video.filename)
+		println("deleting video", video.Filename)
+		DeleteVideo(video.Filename)
+		println("done")
 	}
 }

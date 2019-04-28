@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -46,16 +47,16 @@ func TakePhoto() {
 }
 
 func ListVideos() (videos []struct {
-	filename string
-	duration uint32
+	Filename string
+	Duration uint32
 }) {
 	Action(listVideosCmd, nil, func(payload []byte) {
 		for ; len(payload) > 0; payload = payload[116:] {
 			duration := binary.LittleEndian.Uint32(payload[4:8])
 			filename := string(bytes.Trim(payload[4*4:4*4+100], "\x00"))
 			videos = append(videos, struct {
-				filename string
-				duration uint32
+				Filename string
+				Duration uint32
 			}{filename, duration})
 		}
 	})
@@ -95,16 +96,17 @@ loop:
 
 		// check if this is data for requested file
 		if recvFileName != fileName {
-			fmt.Printf("%v\n%v\n", fmt.Errorf("Can't download this video - bad response"), data[:len(payload)])
+			panic(fmt.Errorf("%v\n%v\n", fmt.Errorf("Can't download this video - bad response"), data[:len(payload)]))
 			return
 		}
 
 		switch data32[0] { // first number is type of data (1 = start, 2 = data, 3 = end)
 		case 1: // start
 			// create empty file
-			file, err := os.OpenFile(filepath.Base(fileName), os.O_CREATE|os.O_WRONLY, 0777)
+			err := error(nil)
+			file, err = os.OpenFile(filepath.Base(fileName), os.O_CREATE|os.O_WRONLY, 0777)
 			if err != nil {
-				fmt.Printf("%v %v\n%v\n", fmt.Errorf("Can't crate video file"), fileName, err)
+				panic(fmt.Errorf("%v %v\n%v\n", fmt.Errorf("Can't crate video file"), fileName, err))
 				return
 			}
 			defer file.Close()
@@ -118,7 +120,7 @@ loop:
 			}
 			bytesLoaded += chunkSize
 		case 3: // end
-			fmt.Printf("%d%%\n", bytesLoaded*100/fileSize)
+			// fmt.Printf("%d%%\n", bytesLoaded*100/fileSize)
 			println("checksum:", chunkSize, bytesLoaded, fileSize, string(data[116:]))
 			if bytesLoaded == fileSize {
 				break loop
@@ -126,14 +128,14 @@ loop:
 			println("Not whole file recieved")
 			// TODO check checksum
 		default:
-			fmt.Printf("wrong state %v\n", data32)
+			println("!!!wrong state", data32)
 			break loop
 		}
 	}
-	println("done")
+	// println("done")
 }
 
-func ReplayVideo(fileName string) {
+func ReplayVideo(fileName string, output io.Writer) {
 	// create custom connection because we cant use Action in this case
 	conn, closeConn := newConn(portByCmd(downloadVideoCmd))
 	if conn == nil {
@@ -145,42 +147,66 @@ func ReplayVideo(fileName string) {
 	payload32 := byteToUint32(payload)
 	payload32[1] = 0x0000003a // ??
 	copy(payload[2*4:4*18], "_lewei_lib_Lewei"+fileName+"\x00ava_lang_String_2III")
-	payload32[19] = 0x00006300
-	payload32[21] = 0x00001a00
-	payload32[25] = 0xff002000
-	payload32[27] = 0xffffff00
-	payload32[29] = 0xffffff00
+	// no idea what these are for:
+	// payload32[19] = 0x00006300
+	// payload32[21] = 0x00001a00
+	// payload32[25] = 0xff002000
+	// payload32[27] = 0xffffff00
+	// payload32[29] = 0xffffff00
 	// fmt.Printf("% x\n", payload)
 
-	file, _ := os.OpenFile("replay"+filepath.Base(fileName), os.O_CREATE|os.O_WRONLY, 0777)
-	defer file.Close()
+	// file, _ := os.OpenFile("replay"+filepath.Base(fileName)+".h264", os.O_CREATE|os.O_WRONLY, 0777)
+	// defer file.Close()
 
 	Req(replayVideoCmd, payload, conn)
+	const fps = 20
+
+	ticker := time.NewTicker(time.Second / fps)
+	defer ticker.Stop()
 
 	for {
+		<-ticker.C
+
 		// incoming()
 		data := Res(videoReplayCmd, conn)
 		data32 := byteToUint32(data)
 		if len(data) == 0 {
 			println("eend")
-			Req(closeCmd, nil, conn)
+			// Req(closeCmd, nil, conn)
 			return
 		}
-
+		// 4 x uint32 chunk header:
+		chunkType := data32[0] // 1 or 0 sometimes 256
+		// 1 is key frame (~40-90kB) every 40th (every 2s)
+		// 0 is delta frame (~1-20kB)
 		chunkSize := data32[1]
-		chunkContent := data[8*4:]
+		_ = data[2] // seems to be always zero
+		// chunkTime := data32[3] // multiples of 50
+		chunkContent := data[32:]
 
-		// println(len(data) - int(chunkSize))
 		if chunkSize == 0 {
 			println("end", data32[0])
-			Req(closeCmd, nil, conn)
+			// Req(closeCmd, nil, conn)
 			return
 		}
 
-		fmt.Printf("% v\n", data32[:10])
-		// fmt.Printf("% v\n", data[10*4:20*4])
-		// println("write", data32[0])
-		file.Write(chunkContent)
+		if chunkType != 1 && chunkType != 0 {
+			println("!!!chunktype", chunkType)
+			return
+		}
+
+		// another layer with 4 x 16uint values
+		frame := binary.LittleEndian.Uint16(chunkContent[0:2])  // seq number of frame
+		ff := binary.LittleEndian.Uint16(chunkContent[2:4])     // seq number of frame
+		timing := binary.LittleEndian.Uint16(chunkContent[4:6]) // same as chunkTime
+		println(frame, ff, timing)
+		if ff == 0xff00 {
+			continue
+		}
+
+		if output != nil {
+			output.Write(chunkContent[8:])
+		}
 	}
 }
 
