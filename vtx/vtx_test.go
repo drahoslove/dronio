@@ -5,11 +5,17 @@ import (
 	"time"
 )
 
+func TestLiveStream(t *testing.T) {
+	SetClock()
+	LiveStream(nil)
+}
 func TestTakePhoto(t *testing.T) {
-	// TakePhoto()
+	return
+	TakePhoto()
 }
 
 func TestCaptureVideo(t *testing.T) {
+	return
 	SetClock()
 	// TakePhoto()
 	// ListVideos()
@@ -25,7 +31,7 @@ func TestCaptureVideo(t *testing.T) {
 		t1 := time.Now()
 		DownloadVideo(video.Filename)
 		println("saving videoreplay")
-		ReplayVideo(video.Filename)
+		ReplayVideo(video.Filename, nil)
 		println(time.Now().Sub(t1).String())
 		time.Sleep(time.Second * 2)
 		println("deleting video", video.Filename)

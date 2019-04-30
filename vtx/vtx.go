@@ -25,7 +25,7 @@ const (
 // only first and fourth number has known meaning so far
 const (
 	cmdI = iota // action
-	_
+	valI        // used with streamLiveVideoCmd cmd to enable/disable stream
 	_
 	lenI // payload size in Bytes appended after header
 	_
@@ -47,16 +47,16 @@ const (
 	deleteVideoCmd  = 0x0014
 	// ??
 	_        = 0x0003 // 7060 // ?
-	closeCmd = 0x0010 // 7060 close stream?
+	closeCmd = 0x0010 // 7060 close socket
 	// req only
-	_                = 0x0002 // 7060 // start stream?
-	replayVideoCmd   = 0x0009 // 7060
-	downloadVideoCmd = 0x0012 // 7060
+	streamLiveVideoCmd = 0x0002 // 7060 // start stream?
+	replayVideoCmd     = 0x0009 // 7060
+	downloadVideoCmd   = 0x0012 // 7060
 	// respo only
-	_                 = 0x0101 // 7060 stream ? after 0002
-	videoReplayCmd    = 0x0103 // 7060 video play after replayVideoCmd
-	videoReplayEndCmd = 0x0105 // 7060 ?? replay end?
-	videoDownloadCmd  = 0x0106 // recv videofile after downloadVideoCmd
+	liveStreamVideoCmd = 0x0101 // 7060 stream ? after 0002
+	videoReplayCmd     = 0x0103 // 7060 video play after replayVideoCmd
+	videoReplayEndCmd  = 0x0105 // 7060 ?? replay end?
+	videoDownloadCmd   = 0x0106 // recv videofile after downloadVideoCmd
 )
 
 // LeweiCmd represents data packet (app layer) sent or received by vtx of the drone
@@ -179,10 +179,16 @@ func send(conn *net.TCPConn, cmd LeweiCmd) error {
 func recv(conn *net.TCPConn) (LeweiCmd, error) {
 	cmd := NewLeweiCmd(0)
 	n, err := conn.Read(cmd.header)
-	if n != len(cmd.header) {
-		println("not whole header", len(cmd.header), n) // correct port?
+	for n != len(cmd.header) {
+		println("waiting for rest of the header", len(cmd.header), n) // correct port?
+		nn, _ := conn.Read(cmd.header[n:])
+		n += nn
+		if n == 0 && nn == 0 { // probably waste of time
+			break
+		}
 	}
 	if err != nil {
+		println("socket probably closed")
 		return cmd, err
 	}
 	payloadLen := cmd.headerGet(lenI)
@@ -201,7 +207,7 @@ func recv(conn *net.TCPConn) (LeweiCmd, error) {
 
 func portByCmd(cmd uint32) int {
 	switch cmd {
-	case replayVideoCmd, downloadVideoCmd, keepAliveCmd:
+	case keepAliveCmd, streamLiveVideoCmd, replayVideoCmd, downloadVideoCmd:
 		return 7060
 	default:
 		return 8060
@@ -247,8 +253,11 @@ func Action(cmd uint32, payload interface{}, callback func([]byte)) {
 func Req(cmd uint32, payload interface{}, conn *net.TCPConn) {
 	// send request
 	req := NewLeweiCmd(cmd)
+	if cmd == streamLiveVideoCmd {
+		req.headerSet(valI, 1) // TODO ??
+	}
 	req.AddPayload(payload)
-	send(conn, req)
+	send(conn, req) // TODO handle error an check closed conn
 }
 
 // Res will obtain response from TCP conn (while skipping keepalive cmds)
@@ -267,7 +276,7 @@ start:
 			goto start
 		}
 		if cmd == videoReplayCmd && recvCmd == videoReplayEndCmd {
-			println("video replay end??")
+			println("video replay end")
 			return resp.payload.Bytes()
 		}
 		if recvCmd == 0 { // closed channel? retun empty cmd

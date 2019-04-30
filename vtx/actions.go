@@ -135,6 +135,7 @@ loop:
 	// println("done")
 }
 
+// ReplayVideo  will stream saved video to provided output writer
 func ReplayVideo(fileName string, output io.Writer) {
 	// create custom connection because we cant use Action in this case
 	conn, closeConn := newConn(portByCmd(downloadVideoCmd))
@@ -144,8 +145,8 @@ func ReplayVideo(fileName string, output io.Writer) {
 	defer closeConn()
 
 	payload := make([]byte, 124)
-	payload32 := byteToUint32(payload)
-	payload32[1] = 0x0000003a // ??
+	// payload32 := byteToUint32(payload)
+	// payload32[1] = 0x0000003a // ??
 	copy(payload[2*4:4*18], "_lewei_lib_Lewei"+fileName+"\x00ava_lang_String_2III")
 	// no idea what these are for:
 	// payload32[19] = 0x00006300
@@ -159,7 +160,7 @@ func ReplayVideo(fileName string, output io.Writer) {
 	// defer file.Close()
 
 	Req(replayVideoCmd, payload, conn)
-	const fps = 20
+	const fps = 10 // half the speed of the actual fps
 
 	ticker := time.NewTicker(time.Second / fps)
 	defer ticker.Stop()
@@ -180,12 +181,13 @@ func ReplayVideo(fileName string, output io.Writer) {
 		// 1 is key frame (~40-90kB) every 40th (every 2s)
 		// 0 is delta frame (~1-20kB)
 		chunkSize := data32[1]
-		_ = data[2] // seems to be always zero
-		// chunkTime := data32[3] // multiples of 50
+		_ = data[2]            // seems to be always zero
+		chunkTime := data32[3] // multiples of 50
+		_ = chunkTime
 		chunkContent := data[32:]
 
 		if chunkSize == 0 {
-			println("end", data32[0])
+			println("end", chunkTime)
 			// Req(closeCmd, nil, conn)
 			return
 		}
@@ -208,6 +210,62 @@ func ReplayVideo(fileName string, output io.Writer) {
 			output.Write(chunkContent[8:])
 		}
 	}
+}
+
+func LiveStream(output io.Writer) {
+	// create custom connection because we cant use Action in this case
+	conn, closeConn := newConn(portByCmd(streamLiveVideoCmd))
+	if conn == nil {
+		return
+	}
+	defer closeConn()
+
+	// send Req for downloading video
+	Req(streamLiveVideoCmd, nil, conn)
+
+	// go func() {
+	// 	time.Sleep(time.Second * 3)
+	// 	Req(closeCmd, nil, conn)
+	// }()
+
+	for {
+		data := Res(liveStreamVideoCmd, conn)
+		data32 := byteToUint32(data)
+
+		if len(data) == 0 {
+			println("eend")
+			// Req(closeCmd, nil, conn)
+			return
+		}
+
+		// header 8 x 32 uint
+		chunkType := data32[0]
+		chunkSize := data32[1]
+		chunkTime := data32[2]
+		// 3th .. 7th - all zeroes
+
+		if chunkSize == 0 {
+			println("end", chunkTime)
+			// Req(closeCmd, nil, conn)
+			return
+		}
+
+		if chunkType != 1 && chunkType != 0 {
+			println("!!!chunktype", chunkType)
+			return
+		}
+
+		// println(chunkType, chunkSize, chunkTime)
+
+		chunkContent := data[32:]
+
+		// fmt.Printf("%v\n", chunkContent[:16])
+
+		if output != nil {
+			output.Write(chunkContent)
+		}
+	}
+
 }
 
 // CaptureVideo will capture video of given period of time
